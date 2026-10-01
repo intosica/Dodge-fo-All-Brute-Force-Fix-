@@ -1,0 +1,86 @@
+name: Build DodgeAll
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: C:\vcpkg-dodge
+      VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache
+
+    steps:
+      - name: Checkout plugin source
+        uses: actions/checkout@v4
+
+      # If you vendored CommonLibSSE-NG into extern/CommonLibSSE-NG this step is skipped.
+      - name: Checkout CommonLibSSE-NG 3.7.0
+        if: ${{ hashFiles('extern/CommonLibSSE-NG/CMakeLists.txt') == '' }}
+        uses: actions/checkout@v4
+        with:
+          repository: CharmedBaryon/CommonLibSSE-NG
+          ref: v3.7.0
+          path: extern/CommonLibSSE-NG
+
+      - name: Point CMake at CommonLibSSE-NG
+        shell: pwsh
+        run: |
+          $p = ($env:GITHUB_WORKSPACE -replace '\\','/') + '/extern/CommonLibSSE-NG'
+          "COMMONLIB_SSE_FOLDER=$p" >> $env:GITHUB_ENV
+          if (-not (Test-Path "$p/CMakeLists.txt")) { throw "CommonLibSSE-NG not found at $p" }
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json', 'cmake/ports/**') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      # Fresh full clone: vcpkg.json pins a builtin-baseline commit that must exist locally.
+      - name: Install vcpkg
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          git clone https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        run: cmake --preset release
+
+      - name: Build
+        run: cmake --build build/release
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/SKSE/Plugins | Out-Null
+          $dll = Get-ChildItem -Path build/release -Filter *.dll -Recurse | Select-Object -First 1
+          if (-not $dll) { throw "No DLL produced" }
+          Copy-Item $dll.FullName dist/SKSE/Plugins/
+          Copy-Item -Recurse -Force Data/* dist/
+          Get-ChildItem -Recurse dist | Select-Object -ExpandProperty FullName
+
+      - name: Upload mod package
+        uses: actions/upload-artifact@v4
+        with:
+          name: DodgeAll-build
+          path: dist
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            build/release/vcpkg-manifest-install.log
+            build/release/CMakeFiles/CMakeError.log
+            build/release/CMakeFiles/CMakeOutput.log
+            C:/vcpkg-dodge/buildtrees/**/*.log
+          if-no-files-found: ignore
